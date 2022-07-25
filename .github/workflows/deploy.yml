@@ -1,0 +1,168 @@
+name: Deploy
+
+# Enable Buildkit and let compose use it to speed up image building
+env:
+  DOCKER_BUILDKIT: 1
+  COMPOSE_DOCKER_CLI_BUILD: 1
+
+on:
+  push:
+    branches: [ "staging" ]
+    paths-ignore: [ "docs/**" ]
+
+
+jobs:
+  inform_about_apply:
+    name: inform about apply
+    runs-on: ubuntu-latest
+    steps:
+      - name: inform on PR that apply is running
+        uses: mshick/add-pr-comment@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token-user-login: 'github-actions[bot]'
+          message: |
+            ***Running terraform apply***
+            Results will display here momentarily...
+
+  # secrets:
+  #   runs-on: ubuntu-latest
+  #   if: ${{ github.event.pull_request.base.ref == 'staging' }}
+  #   steps:
+
+  #     - name: create secret files
+  #       env:
+  #         STAGING_TFVARS: ${{ secrets.STAGING_TFVARS }}
+  #       run: |
+  #         echo $STAGING_TFVARS | base64 -di > staging.tfvars
+
+  #     - uses: actions/upload-artifact@v2
+  #       with:
+  #         name: staging-tfvars
+  #         path: staging.tfvars            
+
+  plan-and-apply-staging:
+    # needs: secrets
+    name: plan and apply
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+
+    steps:
+      - name: check out code
+        uses: actions/checkout@v2
+
+      - name: install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_KEY }}
+          name: id_rsa # optional
+          known_hosts: ${{ secrets.KNOWN_HOSTS }}
+          # config: ${{ secrets.CONFIG }} # ssh_config; optional
+          if_key_exists: fail # replace / ignore / fail; optional (defaults to fail)
+
+      # - uses: actions/download-artifact@v2
+      #   with:
+      #     name: staging-tfvars
+      #     path: terraform
+      - name: create secret files
+        env:
+          STAGING_TFVARS: ${{ secrets.STAGING_TFVARS }}
+        run: |
+          echo $STAGING_TFVARS | base64 -di > staging.tfvars          
+        
+      - name: setup terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.2.2
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: initialize terraform
+        id: tf-init
+        continue-on-error: true
+        env:
+          TF_WORKSPACE: cookiecutter-django-tfdo-demo-staging
+        run: |
+          cd terraform
+          terraform init -input=false
+
+      - name: initialize terraform
+        if: steps.tf-init.outcome == 'failure'
+        run: |
+          cd terraform
+          terraform init -input=false
+
+      - name: select or create workspace
+        env:
+          # ACHTUNG: do not use `TF_WORKSPACE` env variable name since then the "select"
+          # command is ignored
+          WORKSPACE: cookiecutter-django-tfdo-demo-staging
+        continue-on-error: true
+        run: |
+          cd terraform
+          terraform workspace select $WORKSPACE || terraform workspace new $WORKSPACE
+          
+      - name: plan terraform
+        id: plan
+        continue-on-error: true
+        run: |
+          cd terraform
+          terraform plan -var-file=staging.tfvars \
+          -var "ssh_private_key={{ secrets.SSH_PRIVATE_KEY }}" -input=false -no-color
+
+      - name: apply terraform
+        if: steps.plan.outcome == 'success'
+        id: apply
+        continue-on-error: true
+        run: |
+          cd terraform
+          terraform apply -var-file=staging.tfvars \
+          -var "ssh_private_key={{ secrets.SSH_PRIVATE_KEY }}" \
+          -auto-approve -input=false -no-color
+
+      - name: post plan and apply to github PR
+        if: steps.plan.outcome == 'success' && steps.apply.outcome == 'success'
+        uses: mshick/add-pr-comment@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token-user-login: 'github-actions[bot]'
+          message: |
+            Applying **staging**:
+            ```diff
+            ${{ env.PLAN }}
+            ```
+            ```
+            ${{ steps.apply.outputs.stdout }}
+            ```
+
+      - name: add plan failure to PR
+        if: steps.plan.outcome == 'failure'
+        uses: mshick/add-pr-comment@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token-user-login: 'github-actions[bot]'
+          message: |
+            Plan failed for **staging**:
+            ```
+            ${{ steps.plan.outputs.stderr }}
+            ```
+
+      - name: fail if plan fails
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: add apply failure to PR
+        if: steps.apply.outcome == 'failure'
+        uses: mshick/add-pr-comment@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token-user-login: 'github-actions[bot]'
+          message: |
+            Apply failed for **staging**:
+            ```
+            ${{ steps.apply.outputs.stderr }}
+            ```
+
+      - name: fail if apply fails
+        if: steps.apply.outcome == 'failure'
+        run: exit 1
