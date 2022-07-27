@@ -85,7 +85,7 @@ jobs:
         id: tf-init
         continue-on-error: true
         env:
-          TF_WORKSPACE: doge-test-staging
+          TF_WORKSPACE: doge-test
         run: |
           cd terraform
           terraform init -input=false
