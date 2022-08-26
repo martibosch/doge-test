@@ -1,0 +1,164 @@
+name: plan
+
+# Enable Buildkit and let compose use it to speed up image building
+env:
+  DOCKER_BUILDKIT: 1
+  COMPOSE_DOCKER_CLI_BUILD: 1
+
+on:
+  pull_request:
+    branches: [ "stage", "main" ]
+    paths-ignore: [ "docs/**" ]
+
+concurrency:
+  group: ${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  # secrets:
+  #   runs-on: ubuntu-latest
+  #   if: ${{ github.event.pull_request.base.ref == 'stage' }}
+  #   steps:
+
+  #     - name: create secret files
+  #       env:
+  #         STAGE_TFVARS: ${{ secrets.STAGE_TFVARS }}
+  #       run: |
+  #         echo $STAGE_TFVARS | base64 -di > stage.tfvars
+
+  #     - uses: actions/upload-artifact@v2
+  #       with:
+  #         name: stage-tfvars
+  #         path: stage.tfvars          
+          
+  build-and-plan-stage:
+    # needs: secrets
+    environment: stage
+    runs-on: ubuntu-latest
+    if: ${{ github.event.pull_request.base.ref == 'stage' }}
+    steps:
+
+      - name: checkout Code Repository
+        uses: actions/checkout@v3
+
+      - name: build the stack
+        run:  docker-compose -f app/compose.yml up -d --build
+
+      - name: tear down the stack
+        run:  docker-compose -f app/compose.yml down
+
+      - name: install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_KEY }}
+          name: id_rsa # optional
+          # known_hosts: ${{ secrets.KNOWN_HOSTS }}
+          known_hosts: unnecessary
+          # config: ${{ secrets.CONFIG }} # ssh_config; optional
+          if_key_exists: fail # replace / ignore / fail; optional (defaults to fail)
+
+      - name: add known hosts
+        run: ssh-keyscan -H ${{ secrets.DROPLET_HOST }} >> ~/.ssh/known_hosts
+
+      - name: create secret files
+        env:
+          TFVARS: ${{ secrets.TFVARS }}
+        run: |
+          echo $TFVARS | base64 -di > terraform/deploy/app/stage/vars.tfvars
+          
+      - name: setup terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.2.2
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: initialize terraform
+        run: |
+          make init-stage TF_FLAGS="-input=false"
+          
+      - name: plan terraform
+        id: plan
+        continue-on-error: true
+        run: |
+          make plan-stage TF_FLAGS="-input=false -no-color"
+
+      - name: post plan to github PR
+        uses: mshick/add-pr-comment@v1
+        with:
+          allow-repeats: true
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token-user-login: 'github-actions[bot]'
+          message: |
+            ```diff
+            ${{ steps.plan.outputs.stdout }}
+            ```
+
+      - name: fail if plan fails
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  build-and-plan-prod:
+    # needs: secrets
+    environment: prod
+    runs-on: ubuntu-latest
+    if: ${{ github.event.pull_request.base.ref == 'main' }}
+    steps:
+
+      - name: checkout Code Repository
+        uses: actions/checkout@v3
+
+      - name: build the stack
+        run:  docker-compose -f app/compose.yml up -d --build
+
+      - name: tear down the stack
+        run:  docker-compose -f app/compose.yml down
+
+      - name: install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_KEY }}
+          name: id_rsa # optional
+          # known_hosts: ${{ secrets.KNOWN_HOSTS }}
+          known_hosts: unnecessary
+          # config: ${{ secrets.CONFIG }} # ssh_config; optional
+          if_key_exists: fail # replace / ignore / fail; optional (defaults to fail)
+
+      - name: add known hosts
+        run: ssh-keyscan -H ${{ secrets.DROPLET_HOST }} >> ~/.ssh/known_hosts
+
+      - name: create secret files
+        env:
+          TFVARS: ${{ secrets.TFVARS }}
+        run: |
+          echo $TFVARS | base64 -di > terraform/deploy/app/prod/vars.tfvars
+
+      - name: setup terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.2.2
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: initialize terraform
+        run: |
+          make init-prod TF_FLAGS="-input=false"
+
+      - name: plan terraform
+        id: plan
+        continue-on-error: true
+        run: |
+          make plan-prod TF_FLAGS="-input=false -no-color"
+
+      - name: post plan to github PR
+        uses: mshick/add-pr-comment@v1
+        with:
+          allow-repeats: true
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token-user-login: 'github-actions[bot]'
+          message: |
+            ```diff
+            ${{ steps.plan.outputs.stdout }}
+            ```
+
+      - name: fail if plan fails
+        if: steps.plan.outcome == 'failure'
+        run: exit 1   
